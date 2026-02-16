@@ -555,11 +555,7 @@ EOF
     echo ""
 
     local preserve_response=""
-    if ! read -t 30 -p "Preserve files? [y/N]: " preserve_response; then
-        echo ""
-        log_warn "No response received within 30 seconds. Defaulting to cleanup."
-        preserve_response="n"
-    fi
+    read -p "Preserve files? [y/N]: " preserve_response
 
     preserve_response=$(echo "$preserve_response" | tr '[:upper:]' '[:lower:]')
 
