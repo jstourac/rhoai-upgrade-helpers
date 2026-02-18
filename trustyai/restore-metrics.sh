@@ -67,14 +67,15 @@ EOF
 
 # Get endpoint for metric type
 get_endpoint() {
-    local metric_name=$1
+    local metric_name
+    metric_name=$(echo "$1" | tr '[:upper:]' '[:lower:]')
     local route=$2
 
     case ${metric_name} in
-        SPD)
+        spd)
             echo "https://${route}/metrics/group/fairness/spd/request"
             ;;
-        DIR)
+        dir)
             echo "https://${route}/metrics/group/fairness/dir/request"
             ;;
         meanshift)
@@ -233,7 +234,7 @@ fi
 
 # Check service health
 log_info "Checking TrustyAI service health..."
-HEALTH_CHECK=$(curl -s -H "Authorization: Bearer ${AUTH_TOKEN}" \
+HEALTH_CHECK=$(curl -sk -H "Authorization: Bearer ${AUTH_TOKEN}" \
     "https://${TRUSTYAI_ROUTE}/q/health/ready" || echo '{"status":"DOWN"}')
 HEALTH_STATUS=$(echo "${HEALTH_CHECK}" | jq -r '.status // "UNKNOWN"')
 
@@ -252,7 +253,7 @@ fi
 EXISTING_METRICS=""
 if [[ "${SKIP_EXISTING}" == true ]]; then
     log_info "Fetching existing metrics..."
-    EXISTING_METRICS=$(curl -s -H "Authorization: Bearer ${AUTH_TOKEN}" \
+    EXISTING_METRICS=$(curl -sk -H "Authorization: Bearer ${AUTH_TOKEN}" \
         "https://${TRUSTYAI_ROUTE}/metrics/all/requests")
     EXISTING_COUNT=$(echo "${EXISTING_METRICS}" | jq '.requests | length')
     log_info "Found ${EXISTING_COUNT} existing metric(s)"
@@ -262,7 +263,7 @@ fi
 log_info "Processing metrics..."
 echo ""
 
-jq -c '.requests[]' "${BACKUP_FILE}" | while read -r metric; do
+while read -r metric; do
     METRIC_NAME=$(echo "${metric}" | jq -r '.request.metricName')
     MODEL_ID=$(echo "${metric}" | jq -r '.request.modelId')
     OLD_ID=$(echo "${metric}" | jq -r '.id')
@@ -296,7 +297,7 @@ jq -c '.requests[]' "${BACKUP_FILE}" | while read -r metric; do
     fi
 
     # Make the request
-    RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "${ENDPOINT}" \
+    RESPONSE=$(curl -sk -w "\n%{http_code}" -X POST "${ENDPOINT}" \
         -H "Authorization: Bearer ${AUTH_TOKEN}" \
         -H "Content-Type: application/json" \
         -d "${REQUEST_PAYLOAD}")
@@ -322,7 +323,7 @@ jq -c '.requests[]' "${BACKUP_FILE}" | while read -r metric; do
 
     # Small delay to avoid overwhelming the service
     sleep 0.5
-done
+done < <(jq -c '.requests[]' "${BACKUP_FILE}")
 
 # Summary
 echo ""
@@ -343,7 +344,7 @@ fi
 if [[ "${DRY_RUN}" == false ]] && [[ "${SUCCESSFUL}" -gt 0 ]]; then
     echo ""
     log_info "Verifying restoration..."
-    CURRENT_METRICS=$(curl -s -H "Authorization: Bearer ${AUTH_TOKEN}" \
+    CURRENT_METRICS=$(curl -sk -H "Authorization: Bearer ${AUTH_TOKEN}" \
         "https://${TRUSTYAI_ROUTE}/metrics/all/requests")
     CURRENT_COUNT=$(echo "${CURRENT_METRICS}" | jq '.requests | length')
     log_info "Current scheduled metrics: ${CURRENT_COUNT}"

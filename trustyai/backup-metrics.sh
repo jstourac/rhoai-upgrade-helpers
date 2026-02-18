@@ -164,11 +164,11 @@ fi
 
 # Generate backup filename
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-BACKUP_FILE="${BACKUP_DIR}/trustyai-metrics${BACKUP_TYPE_SUFFIX}-${TIMESTAMP}.json"
+BACKUP_FILE="${BACKUP_DIR}/trustyai-metrics-${NAMESPACE}${BACKUP_TYPE_SUFFIX}-${TIMESTAMP}.json"
 
 # Fetch metrics
 log_info "Fetching scheduled metrics from ${API_URL}..."
-HTTP_CODE=$(curl -s -w "%{http_code}" -o "${BACKUP_FILE}" \
+HTTP_CODE=$(curl -sk -w "%{http_code}" -o "${BACKUP_FILE}" \
     -H "Authorization: Bearer ${AUTH_TOKEN}" \
     "${API_URL}")
 
@@ -199,7 +199,7 @@ if [[ "${METRIC_COUNT}" -gt 0 ]]; then
 fi
 
 # Save metadata
-METADATA_FILE="${BACKUP_DIR}/trustyai-metrics${BACKUP_TYPE_SUFFIX}-${TIMESTAMP}.metadata.json"
+METADATA_FILE="${BACKUP_DIR}/trustyai-metrics-${NAMESPACE}${BACKUP_TYPE_SUFFIX}-${TIMESTAMP}.metadata.json"
 cat > "${METADATA_FILE}" << EOF
 {
   "timestamp": "${TIMESTAMP}",
