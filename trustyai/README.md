@@ -1,4 +1,4 @@
-# TrustyAI 2.5 → 3.x Upgrade Scripts
+# TrustyAI 2.25 → 3.x Upgrade Scripts
 
 If you want, you can backup and restore TrustyAI scheduled metrics during operator upgrades (see [Backup and restore metrics](#backup-and-restore-metrics) at the end).
 
@@ -8,7 +8,7 @@ If you want, you can backup and restore TrustyAI scheduled metrics during operat
 
 Prereqs: `oc` (and `oc login`). `jq` is optional (it just makes JSON output easier to read).
 
-### Fix 1: GuardrailsOrchestrator (RHOAI 2.25 -> 3.x)
+### Fix 1: GuardrailsOrchestrator (RHOAI 2.25 → 3.x)
 
 This fix is relevant if you have GuardrailsOrchestrator instances and:
 
@@ -34,13 +34,26 @@ If this returns `No resources found`, you can skip Fix 1.
 This patches the GuardrailsOrchestrator Deployment(s) to add the expected readiness probe on port `8034` at `/health`.
 
 ```bash
-./patch-guardrails-deployment.sh <namespace>
+./patch-guardrails-deployment.sh -n <namespace> --check
 ```
 
-Verify:
+2. (Optional) Preview changes without applying:
 
 ```bash
-ORCH_ROUTE_HEALTH=$(oc get routes -n <namespace> guardrails-orchestrator-health -o jsonpath='{.spec.host}')
+./patch-guardrails-deployment.sh -n <namespace> --dry-run
+```
+
+3. Apply the patch. This patches the GuardrailsOrchestrator Deployment(s) to add the expected readiness probe on port `8034` at `/health`.
+
+```bash
+./patch-guardrails-deployment.sh -n <namespace> --fix
+```
+
+4. Verify that the patch worked:
+
+```bash
+GORCH_NAME=<guardrails-orchestrator-cr-name>
+ORCH_ROUTE_HEALTH=$(oc get routes -n <namespace> "$GORCH_NAME-health" -o jsonpath='{.spec.host}')
 curl -s https://$ORCH_ROUTE_HEALTH/info | jq
 ```
 
@@ -99,7 +112,7 @@ Typical symptoms:
 
 #### Solution
 
-To avoid this deadlock, you can run script `break-gpu-deadlock.sh` which will delete the pending pod and then re-create it. This will allow the LLM deployment to proceed without being stuck in pending state. 
+To avoid this deadlock, you can run script `break-gpu-deadlock.sh` which will delete the pending pod and then re-create it. This will allow the LLM deployment to proceed without being stuck in pending state.
 
 1. Fix deadlocks:
 
