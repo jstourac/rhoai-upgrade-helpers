@@ -1,0 +1,82 @@
+# Self-contained YAML for Dashboard redirect to Data Science Gateway
+# Purpose: Maintain backward compatibility after upgrade removes old dashboard route
+# Supports: RHOAI (rhods-dashboard) and ODH (odh-dashboard)
+# Usage: Run generate-redirect.py to auto-generate this file with correct values
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-redirect-config
+  namespace: ${NAMESPACE}
+  labels:
+    app: nginx-redirect
+data:
+  redirect.conf: |
+    location / {
+        return 301 ${REDIRECT_URL}$$request_uri;
+    }
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx-redirect
+  namespace: ${NAMESPACE}
+  labels:
+    app: nginx-redirect
+spec:
+  restartPolicy: Always
+  containers:
+  - name: nginx
+    image: registry.redhat.io/ubi9/nginx-126:latest
+    command:
+    - /usr/libexec/s2i/run
+    ports:
+    - containerPort: 8080
+      protocol: TCP
+    volumeMounts:
+    - name: nginx-config
+      mountPath: /opt/app-root/etc/nginx.default.d/redirect.conf
+      subPath: redirect.conf
+  volumes:
+  - name: nginx-config
+    configMap:
+      name: nginx-redirect-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx-redirect
+  namespace: ${NAMESPACE}
+  labels:
+    app: nginx-redirect
+spec:
+  ports:
+  - name: http
+    port: 8080
+    protocol: TCP
+    targetPort: 8080
+  selector:
+    app: nginx-redirect
+  type: ClusterIP
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: ${ROUTE_NAME}
+  namespace: ${NAMESPACE}
+  annotations:
+    haproxy.router.openshift.io/hsts_header: max-age=31536000;includeSubDomains;preload
+    kubernetes.io/tls-acme: "true"
+  labels:
+    app: nginx-redirect
+spec:
+  port:
+    targetPort: http
+  tls:
+    insecureEdgeTerminationPolicy: Redirect
+    termination: edge
+  to:
+    kind: Service
+    name: nginx-redirect
+    weight: 100
+  wildcardPolicy: None
