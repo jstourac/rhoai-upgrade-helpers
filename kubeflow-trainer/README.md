@@ -38,5 +38,6 @@ You can list PyTorchJob resources in your cluster using `oc get pytorchjobs -A`.
 
 ```bash
 # Verify migration
+chmod +x kubeflow-trainer-verification.sh
 ./kubeflow-trainer-verification.sh
 ```
