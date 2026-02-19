@@ -157,11 +157,28 @@ patch_workbench() {
     # Generate the JSON Patch dynamically from the current notebook state
     PATCH=$(oc get notebook "$name" -n "$namespace" -o json | jq -c '
     [
-      {"op":"add","path":"/metadata/annotations/notebooks.opendatahub.io~1inject-auth","value":"true"},
-      {"op":"remove","path":"/metadata/annotations/notebooks.opendatahub.io~1inject-oauth"},
-      {"op":"remove","path":"/metadata/annotations/notebooks.opendatahub.io~1oauth-logout-url"},
       (
-        .spec.template.spec.containers | to_entries[] |
+        # Ensure the annotations object exists before adding nested keys.
+        if ((.metadata.annotations // null) == null)
+        then {"op":"add","path":"/metadata/annotations","value":{}}
+        else empty
+        end
+      ),
+      {"op":"add","path":"/metadata/annotations/notebooks.opendatahub.io~1inject-auth","value":"true"},
+      (
+        if (.metadata.annotations // {} | has("notebooks.opendatahub.io/inject-oauth"))
+        then {"op":"remove","path":"/metadata/annotations/notebooks.opendatahub.io~1inject-oauth"}
+        else empty
+        end
+      ),
+      (
+        if (.metadata.annotations // {} | has("notebooks.opendatahub.io/oauth-logout-url"))
+        then {"op":"remove","path":"/metadata/annotations/notebooks.opendatahub.io~1oauth-logout-url"}
+        else empty
+        end
+      ),
+      (
+        .spec.template.spec.containers // [] | to_entries[] |
         select(.value.name == "oauth-proxy") |
         {"op":"remove", "path": "/spec/template/spec/containers/\(.key)"}
       ),
@@ -179,13 +196,13 @@ patch_workbench() {
         # Strip --ServerApp.tornado_settings=... from the NOTEBOOK_ARGS env var.
         # This setting carried OAuth-proxy user/hub metadata that is no longer
         # needed with kube-rbac-proxy in 3.x.
-        .spec.template.spec.containers | to_entries[] |
+        .spec.template.spec.containers // [] | to_entries[] |
         .key as $ci |
         .value.env // [] | to_entries[] |
         select(.value.name == "NOTEBOOK_ARGS") |
-        select(.value.value | test("--ServerApp\\.tornado_settings=")) |
+        select((.value.value // "") | test("--ServerApp\\.tornado_settings=")) |
         .key as $ei |
-        (.value.value | gsub("[\\n\\r\\t ]*--ServerApp\\.tornado_settings=[^\\n]*"; "")) as $new_val |
+        ((.value.value // "") | gsub("[\\n\\r\\t ]*--ServerApp\\.tornado_settings=[^\\n]*"; "")) as $new_val |
         {"op":"replace", "path": "/spec/template/spec/containers/\($ci)/env/\($ei)/value", "value": $new_val}
       )
     ] | sort_by(.path) | reverse')
