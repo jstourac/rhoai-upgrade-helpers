@@ -141,6 +141,34 @@ EOF
     ask_confirmation
 }
 
+# Ask whether cleanup should continue for a single workbench when pre-checks fail.
+# Returns:
+#   0 -> continue cleanup
+#   1 -> skip cleanup for this workbench
+ask_cleanup_continue_or_skip() {
+    local name="$1"
+    local namespace="$2"
+    local answer=""
+
+    if [ "${SKIP_CONFIRM:-false}" = true ]; then
+        echo "  --yes provided: proceeding with cleanup for '$name' in '$namespace' despite failed pre-checks."
+        return 0
+    fi
+
+    echo ""
+    if [ -r /dev/tty ]; then
+        read -r -p "Pre-checks failed for '$name' in '$namespace'. Type 'yes' to continue cleanup, or press Enter to skip: " answer < /dev/tty
+    else
+        echo "  No interactive terminal detected and --yes not set; skipping cleanup for safety."
+        return 1
+    fi
+
+    if [ "$answer" = "yes" ]; then
+        return 0
+    fi
+    return 1
+}
+
 # ──────────────────────────────────────────────
 # Core functions (single workbench)
 # ──────────────────────────────────────────────
@@ -235,6 +263,19 @@ cleanup_workbench() {
     echo " Starting cleanup for Notebook: $name"
     echo " Target Namespace:              $namespace"
     echo "=========================================================="
+    echo "[Pre-check] Running verify checks before cleanup..."
+
+    if check_workbench_migration "$name" "$namespace" true; then
+        echo "  Pre-check result: all verification checks passed."
+    else
+        echo "  Pre-check result: one or more verification checks failed."
+        if ask_cleanup_continue_or_skip "$name" "$namespace"; then
+            echo "  Continuing cleanup for '$name' in '$namespace' by user choice."
+        else
+            echo "  Skipping cleanup for '$name' in '$namespace'."
+            return 0
+        fi
+    fi
 
     echo "[1/3] Removing Route and Services..."
     oc delete route "$name" -n "$namespace" --ignore-not-found
@@ -251,23 +292,30 @@ cleanup_workbench() {
     echo "=========================================================="
 }
 
-# Verify migration status for a single notebook.
+# Run migration checks used by verify and cleanup pre-check.
 #   $1 = notebook name
 #   $2 = namespace
-verify_workbench() {
+#   $3 = verbose output (true/false)
+# Returns:
+#   0 -> all checks passed
+#   1 -> one or more checks failed
+check_workbench_migration() {
     local name="$1"
     local namespace="$2"
+    local verbose="${3:-false}"
     local pass=true
-
-    echo "=== Verifying Notebook: $name in $namespace ==="
 
     # Check inject-auth annotation (should be "true")
     AUTH=$(oc get notebook "$name" -n "$namespace" \
         -o jsonpath='{.metadata.annotations.notebooks\.opendatahub\.io/inject-auth}' 2>/dev/null)
     if [ "$AUTH" = "true" ]; then
-        echo "  PASS: inject-auth annotation is set to 'true'"
+        if [ "$verbose" = true ]; then
+            echo "  PASS: inject-auth annotation is set to 'true'"
+        fi
     else
-        echo "  FAIL: inject-auth annotation missing or incorrect (found: '$AUTH')"
+        if [ "$verbose" = true ]; then
+            echo "  FAIL: inject-auth annotation missing or incorrect (found: '$AUTH')"
+        fi
         pass=false
     fi
 
@@ -275,9 +323,13 @@ verify_workbench() {
     OAUTH=$(oc get notebook "$name" -n "$namespace" \
         -o jsonpath='{.metadata.annotations.notebooks\.opendatahub\.io/inject-oauth}' 2>/dev/null)
     if [ -z "$OAUTH" ]; then
-        echo "  PASS: Legacy inject-oauth annotation removed"
+        if [ "$verbose" = true ]; then
+            echo "  PASS: Legacy inject-oauth annotation removed"
+        fi
     else
-        echo "  FAIL: Legacy inject-oauth annotation still exists: '$OAUTH'"
+        if [ "$verbose" = true ]; then
+            echo "  FAIL: Legacy inject-oauth annotation still exists: '$OAUTH'"
+        fi
         pass=false
     fi
 
@@ -285,10 +337,14 @@ verify_workbench() {
     NB_ARGS=$(oc get notebook "$name" -n "$namespace" -o json 2>/dev/null \
         | jq -r '.spec.template.spec.containers[].env // [] | .[] | select(.name == "NOTEBOOK_ARGS") | .value' 2>/dev/null)
     if echo "$NB_ARGS" | grep -q -- "--ServerApp.tornado_settings="; then
-        echo "  FAIL: --ServerApp.tornado_settings still present in NOTEBOOK_ARGS"
+        if [ "$verbose" = true ]; then
+            echo "  FAIL: --ServerApp.tornado_settings still present in NOTEBOOK_ARGS"
+        fi
         pass=false
     else
-        echo "  PASS: --ServerApp.tornado_settings removed from NOTEBOOK_ARGS"
+        if [ "$verbose" = true ]; then
+            echo "  PASS: --ServerApp.tornado_settings removed from NOTEBOOK_ARGS"
+        fi
     fi
 
     # Check sidecar containers
@@ -296,22 +352,48 @@ verify_workbench() {
         -o jsonpath='{.spec.template.spec.containers[*].name}' 2>/dev/null)
 
     if echo "$CONTAINERS" | grep -q "kube-rbac-proxy"; then
-        echo "  PASS: kube-rbac-proxy sidecar container present (RHOAI 3.x)"
+        if [ "$verbose" = true ]; then
+            echo "  PASS: kube-rbac-proxy sidecar container present (RHOAI 3.x)"
+        fi
     else
-        echo "  FAIL: kube-rbac-proxy sidecar container missing"
+        if [ "$verbose" = true ]; then
+            echo "  FAIL: kube-rbac-proxy sidecar container missing"
+        fi
         pass=false
     fi
 
     if echo "$CONTAINERS" | grep -q "oauth-proxy"; then
-        echo "  FAIL: Legacy oauth-proxy sidecar still present (RHOAI 2.x)"
+        if [ "$verbose" = true ]; then
+            echo "  FAIL: Legacy oauth-proxy sidecar still present (RHOAI 2.x)"
+        fi
         pass=false
     else
-        echo "  PASS: Legacy oauth-proxy sidecar removed"
+        if [ "$verbose" = true ]; then
+            echo "  PASS: Legacy oauth-proxy sidecar removed"
+        fi
     fi
 
-    echo "  Containers found: $CONTAINERS"
+    if [ "$verbose" = true ]; then
+        echo "  Containers found: $CONTAINERS"
+    fi
 
     if [ "$pass" = true ]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Verify migration status for a single notebook.
+#   $1 = notebook name
+#   $2 = namespace
+verify_workbench() {
+    local name="$1"
+    local namespace="$2"
+
+    echo "=== Verifying Notebook: $name in $namespace ==="
+
+    if check_workbench_migration "$name" "$namespace" true; then
         echo "=== RESULT: ALL CHECKS PASSED ==="
     else
         echo "=== RESULT: SOME CHECKS FAILED ==="
