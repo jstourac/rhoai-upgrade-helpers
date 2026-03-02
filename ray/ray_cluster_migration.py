@@ -2083,18 +2083,12 @@ def post_upgrade(
 
             if is_suspended:
                 # Suspended clusters don't have pods, so skip pod readiness check
-                # But route should still be present
-                route_url = _get_cluster_route(api_instance, name, ns)
-                if route_url:
-                    print(f"  [OK] Migrated: {name} (ns: {ns}) [SUSPENDED - no pod readiness check needed]")
-                    print(f"       Dashboard (when unsuspended): {route_url}")
-                    if not dry_run:
-                        _remove_pre_upgrade_backup_annotation(api_instance, name, ns)
-                    migrated_count += 1
-                    successfully_migrated.append({"name": name, "namespace": ns})
-                else:
-                    print(f"  [FAIL] {name} (ns: {ns}) [SUSPENDED] - route not found")
-                    failed_count += 1
+                # Route will be created by the operator when the cluster is unsuspended
+                print(f"  [OK] Migrated: {name} (ns: {ns}) [SUSPENDED - no pod readiness check needed]")
+                if not dry_run:
+                    _remove_pre_upgrade_backup_annotation(api_instance, name, ns)
+                migrated_count += 1
+                successfully_migrated.append({"name": name, "namespace": ns})
             else:
                 print(f"  [{name}] Waiting for cluster to become ready...")
                 cluster_ready = _wait_for_cluster_ready(
