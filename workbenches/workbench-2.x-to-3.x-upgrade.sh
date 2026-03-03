@@ -6,7 +6,7 @@
 # RHOAI workbenches from OAuth-proxy (2.x) to kube-rbac-proxy (3.x).
 #
 # Usage:
-#   ./workbench-2.x-to-3.x-upgrade.sh <command> [--name NAME --namespace NAMESPACE | --all]
+#   ./workbench-2.x-to-3.x-upgrade.sh <command> [--name NAME --namespace NAMESPACE | --namespace NAMESPACE | --all]
 #
 # IMPORTANT: The patch operation causes running workbenches to restart.
 # It is recommended to stop all affected workbenches BEFORE running the
@@ -33,6 +33,7 @@
 #   ./workbench-2.x-to-3.x-upgrade.sh list    --all
 #   ./workbench-2.x-to-3.x-upgrade.sh list    --name my-wb --namespace my-ns
 #   ./workbench-2.x-to-3.x-upgrade.sh patch   --name my-wb --namespace my-ns
+#   ./workbench-2.x-to-3.x-upgrade.sh patch   --namespace my-ns            # Patches all notebooks in namespace
 #   ./workbench-2.x-to-3.x-upgrade.sh patch   --all
 #   ./workbench-2.x-to-3.x-upgrade.sh cleanup --all
 #   ./workbench-2.x-to-3.x-upgrade.sh verify  --name my-wb --namespace my-ns
@@ -70,7 +71,8 @@ Troubleshooting commands (run only if odh-cli pre-check fails for kueue label on
 
 Options:
   --name NAME              Notebook name   (required for single-workbench mode)
-  --namespace NAMESPACE    Notebook namespace (required for single-workbench mode)
+  --namespace NAMESPACE    Notebook namespace (required for single-workbench mode;
+                           when used alone, operates on all notebooks in namespace)
   --all                    Operate on every notebook in the cluster
   --phase PHASE            Verify phase: migration|cleanup|all (verify command only;
                            default: migration)
@@ -84,16 +86,21 @@ Options:
   -y, --yes                Skip confirmation prompts (for automation / CI)
   --queue-name NAME        Queue name value for attach-kueue-label (default: 'default')
 
-One of "--name NAME --namespace NAMESPACE" or "--all" must be provided.
+Target mode (one required):
+  --name NAME --namespace NAMESPACE   Single notebook
+  --namespace NAMESPACE               All notebooks in a namespace
+  --all                               All notebooks cluster-wide
 
 Examples (main workflow):
   $(basename "$0") list    --all
   $(basename "$0") patch   --name my-wb --namespace my-ns
+  $(basename "$0") patch   --namespace my-ns                 # All notebooks in namespace
   $(basename "$0") patch   --name my-wb --namespace my-ns --with-cleanup
   $(basename "$0") patch   --all --skip-stop
   $(basename "$0") patch   --all --only-stopped
   $(basename "$0") cleanup --all
   $(basename "$0") verify  --name my-wb --namespace my-ns
+  $(basename "$0") verify  --namespace my-ns                 # All notebooks in namespace
   $(basename "$0") verify  --all
   $(basename "$0") verify  --all --phase cleanup
 
@@ -229,15 +236,25 @@ EOF
 EOF
     fi
     print_cluster_info
-    if [ "$ALL" = true ]; then
-        if [ "$ONLY_STOPPED" = true ]; then
-            echo "  Target:  ALL STOPPED notebooks in the cluster"
-        else
-            echo "  Target:  ALL notebooks in the cluster"
-        fi
-    else
-        echo "  Target:  notebook '$NAME' in namespace '$NAMESPACE'"
-    fi
+    case "$MODE" in
+        all)
+            if [ "$ONLY_STOPPED" = true ]; then
+                echo "  Target:  ALL STOPPED notebooks in the cluster"
+            else
+                echo "  Target:  ALL notebooks in the cluster"
+            fi
+            ;;
+        namespace)
+            if [ "$ONLY_STOPPED" = true ]; then
+                echo "  Target:  ALL STOPPED notebooks in namespace '$NAMESPACE'"
+            else
+                echo "  Target:  ALL notebooks in namespace '$NAMESPACE'"
+            fi
+            ;;
+        single)
+            echo "  Target:  notebook '$NAME' in namespace '$NAMESPACE'"
+            ;;
+    esac
     ask_confirmation
 }
 
@@ -257,11 +274,17 @@ confirm_cleanup() {
 ╚════════════════════════════════════════════════════════════════╝
 EOF
     print_cluster_info
-    if [ "$ALL" = true ]; then
-        echo "  Target:  ALL notebooks in the cluster"
-    else
-        echo "  Target:  notebook '$NAME' in namespace '$NAMESPACE'"
-    fi
+    case "$MODE" in
+        all)
+            echo "  Target:  ALL notebooks in the cluster"
+            ;;
+        namespace)
+            echo "  Target:  ALL notebooks in namespace '$NAMESPACE'"
+            ;;
+        single)
+            echo "  Target:  notebook '$NAME' in namespace '$NAMESPACE'"
+            ;;
+    esac
     ask_confirmation
 }
 
@@ -1176,6 +1199,42 @@ process_all() {
     return 0
 }
 
+# Run a function for every notebook in a specific namespace.
+#   $1 = function to call (receives name, namespace as arguments)
+#   $2 = namespace
+process_namespace() {
+    local func="$1"
+    local namespace="$2"
+    local total=0
+    local failed=0
+
+    while read -r nb_name; do
+        total=$((total + 1))
+        if ! "$func" "$nb_name" "$namespace"; then
+            failed=$((failed + 1))
+        fi
+    done < <(
+        oc get notebooks -n "$namespace" \
+            -o custom-columns=NAME:.metadata.name \
+            --no-headers 2>/dev/null
+    )
+
+    if [ "$total" -eq 0 ]; then
+        echo "No notebooks found in namespace '$namespace'."
+        return 0
+    fi
+
+    if [ "$failed" -gt 0 ]; then
+        echo ""
+        echo "Processed $total notebook(s) in namespace '$namespace': $failed failed."
+        return 1
+    fi
+
+    echo ""
+    echo "Processed $total notebook(s) in namespace '$namespace': all succeeded."
+    return 0
+}
+
 # ──────────────────────────────────────────────
 # Argument parsing
 # ──────────────────────────────────────────────
@@ -1243,17 +1302,22 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# Validate targeting options
+# Validate targeting options and determine mode
+# MODE: "all" | "namespace" | "single"
 if [ "$ALL" = true ] && { [ -n "$NAME" ] || [ -n "$NAMESPACE" ]; }; then
     echo "Error: --all cannot be combined with --name/--namespace."
     usage
 fi
 
-if [ "$ALL" = false ]; then
-    if [ -z "$NAME" ] || [ -z "$NAMESPACE" ]; then
-        echo "Error: Both --name and --namespace are required for single-workbench mode."
-        usage
-    fi
+if [ "$ALL" = true ]; then
+    MODE="all"
+elif [ -n "$NAMESPACE" ] && [ -z "$NAME" ]; then
+    MODE="namespace"
+elif [ -n "$NAMESPACE" ] && [ -n "$NAME" ]; then
+    MODE="single"
+else
+    echo "Error: Must provide --all, --namespace, or both --name and --namespace."
+    usage
 fi
 
 if [ "$COMMAND" != "verify" ] && [ "$VERIFY_PHASE" != "migration" ]; then
@@ -1291,11 +1355,17 @@ fi
 # ──────────────────────────────────────────────
 case "$COMMAND" in
     list)
-        if [ "$ALL" = true ]; then
-            list_all_workbenches
-        else
-            list_workbench "$NAME" "$NAMESPACE"
-        fi
+        case "$MODE" in
+            all)
+                list_all_workbenches
+                ;;
+            namespace)
+                process_namespace list_workbench "$NAMESPACE"
+                ;;
+            single)
+                list_workbench "$NAME" "$NAMESPACE"
+                ;;
+        esac
         ;;
     patch)
         confirm_patch
@@ -1310,19 +1380,31 @@ case "$COMMAND" in
         if [ "$SKIP_STOP" = false ] && [ "$ONLY_STOPPED" = false ]; then
             echo ""
             echo "=== Stopping any still-running workbench(es) before patching ==="
-            if [ "$ALL" = true ]; then
-                process_all stop_workbench
-            else
-                stop_workbench "$NAME" "$NAMESPACE"
-            fi
+            case "$MODE" in
+                all)
+                    process_all stop_workbench
+                    ;;
+                namespace)
+                    process_namespace stop_workbench "$NAMESPACE"
+                    ;;
+                single)
+                    stop_workbench "$NAME" "$NAMESPACE"
+                    ;;
+            esac
             echo ""
         fi
 
-        if [ "$ALL" = true ]; then
-            process_all patch_workbench
-        else
-            patch_workbench "$NAME" "$NAMESPACE"
-        fi
+        case "$MODE" in
+            all)
+                process_all patch_workbench
+                ;;
+            namespace)
+                process_namespace patch_workbench "$NAMESPACE"
+                ;;
+            single)
+                patch_workbench "$NAME" "$NAMESPACE"
+                ;;
+        esac
 
         # Restart workbenches that were stopped by the script
         if [ -s "$STOPPED_BY_SCRIPT" ]; then
@@ -1337,11 +1419,17 @@ case "$COMMAND" in
         if [ "$WITH_CLEANUP" = true ]; then
             echo "=== Running cleanup after patch (--with-cleanup) ==="
             confirm_cleanup
-            if [ "$ALL" = true ]; then
-                process_all cleanup_workbench
-            else
-                cleanup_workbench "$NAME" "$NAMESPACE"
-            fi
+            case "$MODE" in
+                all)
+                    process_all cleanup_workbench
+                    ;;
+                namespace)
+                    process_namespace cleanup_workbench "$NAMESPACE"
+                    ;;
+                single)
+                    cleanup_workbench "$NAME" "$NAMESPACE"
+                    ;;
+            esac
         fi
 
         # Check for pods stuck in Terminating state in Kueue-managed namespaces
@@ -1352,26 +1440,44 @@ case "$COMMAND" in
         ;;
     cleanup)
         confirm_cleanup
-        if [ "$ALL" = true ]; then
-            process_all cleanup_workbench
-        else
-            cleanup_workbench "$NAME" "$NAMESPACE"
-        fi
+        case "$MODE" in
+            all)
+                process_all cleanup_workbench
+                ;;
+            namespace)
+                process_namespace cleanup_workbench "$NAMESPACE"
+                ;;
+            single)
+                cleanup_workbench "$NAME" "$NAMESPACE"
+                ;;
+        esac
         ;;
     verify)
-        if [ "$ALL" = true ]; then
-            process_all verify_workbench
-        else
-            verify_workbench "$NAME" "$NAMESPACE"
-        fi
+        case "$MODE" in
+            all)
+                process_all verify_workbench
+                ;;
+            namespace)
+                process_namespace verify_workbench "$NAMESPACE"
+                ;;
+            single)
+                verify_workbench "$NAME" "$NAMESPACE"
+                ;;
+        esac
         ;;
     attach-kueue-label)
         echo "=== Patching kueue queue-name labels ==="
-        if [ "$ALL" = true ]; then
-            process_all patch_kueue_label_workbench
-        else
-            patch_kueue_label_workbench "$NAME" "$NAMESPACE"
-        fi
+        case "$MODE" in
+            all)
+                process_all patch_kueue_label_workbench
+                ;;
+            namespace)
+                process_namespace patch_kueue_label_workbench "$NAMESPACE"
+                ;;
+            single)
+                patch_kueue_label_workbench "$NAME" "$NAMESPACE"
+                ;;
+        esac
         echo "=== Kueue label patching complete ==="
         ;;
     *)
