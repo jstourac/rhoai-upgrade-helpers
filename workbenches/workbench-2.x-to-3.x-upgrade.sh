@@ -77,6 +77,8 @@ Options:
   --skip-stop              Skip the automatic stop/restart of workbenches before
                            and after patching (use only if you are managing the
                            workbench lifecycle manually)
+  --only-stopped           Only patch workbenches that are already stopped
+                           (patch command only; skips running workbenches)
   --with-cleanup           Run cleanup automatically after a successful patch
                            (patch command only)
   -y, --yes                Skip confirmation prompts (for automation / CI)
@@ -89,6 +91,7 @@ Examples (main workflow):
   $(basename "$0") patch   --name my-wb --namespace my-ns
   $(basename "$0") patch   --name my-wb --namespace my-ns --with-cleanup
   $(basename "$0") patch   --all --skip-stop
+  $(basename "$0") patch   --all --only-stopped
   $(basename "$0") cleanup --all
   $(basename "$0") verify  --name my-wb --namespace my-ns
   $(basename "$0") verify  --all
@@ -153,7 +156,26 @@ patch_exit_handler() {
 
 # Confirmation gate for the patch command.
 confirm_patch() {
-    if [ "$SKIP_STOP" = true ]; then
+    if [ "$ONLY_STOPPED" = true ]; then
+        cat <<'EOF'
+
+╔════════════════════════════════════════════════════════════════╗
+║                        *** NOTICE ***                          ║
+║                                                                ║
+║  You are about to PATCH notebook resources on this cluster     ║
+║  with --only-stopped enabled.                                  ║
+║                                                                ║
+║  This operation will:                                          ║
+║   - Only patch workbenches that are ALREADY STOPPED            ║
+║   - Skip any workbenches that are currently running            ║
+║   - Modify notebook CRs (annotations, containers, volumes)     ║
+║   - Delete StatefulSets                                        ║
+║   - Strip legacy OAuth-proxy configuration                     ║
+║                                                                ║
+║  Running workbenches will NOT be affected by this operation.   ║
+╚════════════════════════════════════════════════════════════════╝
+EOF
+    elif [ "$SKIP_STOP" = true ]; then
         cat <<'EOF'
 
 ╔════════════════════════════════════════════════════════════════╗
@@ -208,7 +230,11 @@ EOF
     fi
     print_cluster_info
     if [ "$ALL" = true ]; then
-        echo "  Target:  ALL notebooks in the cluster"
+        if [ "$ONLY_STOPPED" = true ]; then
+            echo "  Target:  ALL STOPPED notebooks in the cluster"
+        else
+            echo "  Target:  ALL notebooks in the cluster"
+        fi
     else
         echo "  Target:  notebook '$NAME' in namespace '$NAMESPACE'"
     fi
@@ -396,6 +422,27 @@ stop_workbench() {
     echo "  Workbench '$name' stopped successfully."
 }
 
+# Check if a workbench is stopped (has kubeflow-resource-stopped annotation).
+#   $1 = notebook name
+#   $2 = namespace
+# Returns:
+#   0 -> workbench is stopped
+#   1 -> workbench is running (not stopped)
+is_workbench_stopped() {
+    local name="$1"
+    local namespace="$2"
+    local stopped_annotation
+
+    stopped_annotation=$(oc get notebook "$name" -n "$namespace" \
+        -o jsonpath='{.metadata.annotations.kubeflow-resource-stopped}' 2>/dev/null)
+
+    if [ -n "$stopped_annotation" ]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
 # Restart a workbench that was stopped by the script by removing the
 # kubeflow-resource-stopped annotation.
 #   $1 = notebook name
@@ -416,6 +463,14 @@ restart_workbench() {
 patch_workbench() {
     local name="$1"
     local namespace="$2"
+
+    # If --only-stopped is set, skip workbenches that are not stopped
+    if [ "$ONLY_STOPPED" = true ]; then
+        if ! is_workbench_stopped "$name" "$namespace"; then
+            echo "  Skipping '$name' in '$namespace' — workbench is running (--only-stopped)."
+            return 0
+        fi
+    fi
 
     echo "Patching notebook '$name' in namespace '$namespace'..."
 
@@ -1014,6 +1069,7 @@ ALL=false
 SKIP_CONFIRM=false
 VERIFY_PHASE="migration"
 SKIP_STOP=false
+ONLY_STOPPED=false
 WITH_CLEANUP=false
 NAME=""
 NAMESPACE=""
@@ -1039,6 +1095,10 @@ while [ $# -gt 0 ]; do
             ;;
         --skip-stop)
             SKIP_STOP=true
+            shift
+            ;;
+        --only-stopped)
+            ONLY_STOPPED=true
             shift
             ;;
         --with-cleanup)
@@ -1086,6 +1146,16 @@ if [ "$COMMAND" != "patch" ] && [ "$WITH_CLEANUP" = true ]; then
     usage
 fi
 
+if [ "$COMMAND" != "patch" ] && [ "$ONLY_STOPPED" = true ]; then
+    echo "Error: --only-stopped is only supported with the patch command."
+    usage
+fi
+
+if [ "$ONLY_STOPPED" = true ] && [ "$SKIP_STOP" = true ]; then
+    echo "Error: --only-stopped and --skip-stop cannot be combined."
+    usage
+fi
+
 if [ "$COMMAND" = "verify" ]; then
     case "$VERIFY_PHASE" in
         migration|cleanup|all) ;;
@@ -1117,7 +1187,7 @@ case "$COMMAND" in
         KUEUE_WORKBENCHES_TO_CHECK=$(mktemp)
         trap 'patch_exit_handler' EXIT
 
-        if [ "$SKIP_STOP" = false ]; then
+        if [ "$SKIP_STOP" = false ] && [ "$ONLY_STOPPED" = false ]; then
             echo ""
             echo "=== Stopping any still-running workbench(es) before patching ==="
             if [ "$ALL" = true ]; then
