@@ -113,31 +113,27 @@ def _confirm(prompt: str, auto_confirm: bool = False) -> bool:
 
 def config_check():
     """
-    Check and load the Kubernetes config from the default location.
+    Check and load the Kubernetes config.
 
-    This function checks if a Kubernetes config file exists at the default path
-    (~/.kube/config). If none is provided, it tries to load in-cluster config.
+    Resolution order:
+    1. KUBECONFIG environment variable (may contain multiple paths)
+    2. ~/.kube/config
+    3. In-cluster config (when running inside a Kubernetes pod)
 
     Raises:
         RuntimeError: If no valid credentials or config file is found.
     """
-    home_directory = os.path.expanduser("~")
-
-    # Try to load kube config if not already loaded
     try:
-        # First try to load from default location
-        if os.path.isfile(f"{home_directory}/.kube/config"):
-            config.load_kube_config()
-        # Then try in-cluster config
-        elif "KUBERNETES_PORT" in os.environ:
+        config.load_kube_config()
+    except config.ConfigException:
+        try:
             config.load_incluster_config()
-        else:
+        except config.ConfigException:
             raise RuntimeError(
                 "No Kubernetes configuration found. Please ensure you have a valid "
-                "~/.kube/config file or are running in a Kubernetes cluster."
+                "kubeconfig (via KUBECONFIG env var or ~/.kube/config) "
+                "or are running in a Kubernetes cluster."
             )
-    except config.ConfigException as e:
-        raise RuntimeError(f"Failed to load Kubernetes configuration: {e}")
 
 
 def get_api_client() -> client.ApiClient:
@@ -1673,8 +1669,6 @@ def pre_upgrade(
     print()
 
     output_dir = os.path.join(RHOAI_UPGRADE_BACKUP_DIR, "ray")
-    print(f"Backup files will be saved to: {output_dir}")
-    print()
 
     print("Connecting to Kubernetes cluster...")
     try:
@@ -1765,6 +1759,9 @@ def pre_upgrade(
     except Exception as e:
         print(f"  Warning: could not remove Routes owned by RayClusters: {e}")
         print()
+
+    print(f"Backup files will be saved to: {output_dir}")
+    print()
 
     # Create output directory if it doesn't exist (only when we have clusters to backup)
     if not os.path.exists(output_dir):
